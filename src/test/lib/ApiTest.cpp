@@ -5484,6 +5484,107 @@ void QuicTestStreamParam()
         }
     }
 #endif // QUIC_PARAM_STREAM_RELIABLE_OFFSET
+
+    //
+    // QUIC_PARAM_STREAM_SEND_DSCP
+    //
+    {
+        uint8_t Dscp = 0;
+        uint32_t BufferLength = sizeof(Dscp);
+        MsQuicStream ClientStream(Connection, QUIC_STREAM_OPEN_FLAG_NONE);
+        TEST_QUIC_SUCCEEDED(
+            MsQuic->GetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                &BufferLength,
+                &Dscp));
+        TEST_EQUAL(sizeof(Dscp), BufferLength);
+        TEST_EQUAL(0, Dscp); // Default is 0
+
+        BufferLength = 0;
+        TEST_QUIC_STATUS(
+            QUIC_STATUS_BUFFER_TOO_SMALL,
+            MsQuic->GetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                &BufferLength,
+                &Dscp));
+        TEST_EQUAL(sizeof(Dscp), BufferLength);
+
+        BufferLength = sizeof(Dscp);
+        TEST_QUIC_STATUS(
+            QUIC_STATUS_INVALID_PARAMETER,
+            MsQuic->GetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                &BufferLength,
+                nullptr));
+
+        Dscp = 46; 
+        TEST_QUIC_SUCCEEDED(
+            MsQuic->SetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                sizeof(Dscp),
+                &Dscp));
+
+        BufferLength = sizeof(Dscp);
+        uint8_t NewDscp = 0;
+        TEST_QUIC_SUCCEEDED(
+            MsQuic->GetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                &BufferLength,
+                &NewDscp));
+        TEST_EQUAL(sizeof(NewDscp), BufferLength);
+        TEST_EQUAL(Dscp, NewDscp);
+
+        Dscp = 64; // Invalid DSCP, DSCP is 6-bit value.
+        TEST_QUIC_STATUS(
+            QUIC_STATUS_INVALID_PARAMETER,
+            MsQuic->SetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                sizeof(Dscp),
+                &Dscp));
+
+        Dscp = 0;
+        TEST_QUIC_STATUS(
+            QUIC_STATUS_INVALID_PARAMETER,
+            MsQuic->SetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                sizeof(Dscp) + 1, // Invalid size
+                &Dscp));
+
+        TEST_QUIC_STATUS(
+            QUIC_STATUS_INVALID_PARAMETER,
+            MsQuic->SetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                sizeof(Dscp),
+                nullptr)); // Invalid buffer
+
+        // Reset to default
+        Dscp = 0;
+        TEST_QUIC_SUCCEEDED(
+            MsQuic->SetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                sizeof(Dscp),
+                &Dscp));
+
+        BufferLength = sizeof(Dscp);
+        TEST_QUIC_SUCCEEDED(
+            MsQuic->GetParam(
+                ClientStream.Handle,
+                QUIC_PARAM_STREAM_SEND_DSCP,
+                &BufferLength,
+                &NewDscp));
+        TEST_EQUAL(sizeof(NewDscp), BufferLength);
+        TEST_EQUAL(0, NewDscp);
+    }
+
 }
 
 void
