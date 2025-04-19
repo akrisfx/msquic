@@ -965,7 +965,7 @@ typedef struct QUIC_SCHANNEL_CONTEXT_ATTRIBUTE_EX_W {
 #endif
 
 
-//
+// //
 typedef
 _IRQL_requires_max_(PASSIVE_LEVEL)
 QUIC_STATUS
