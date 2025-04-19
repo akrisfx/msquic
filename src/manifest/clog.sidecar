@@ -11701,6 +11701,22 @@
       ],
       "macroName": "QuicTraceEvent"
     },
+    "StreamDscpSet": {
+      "ModuleProperites": {},
+      "TraceString": "[strm][%p] Stream DSCP set to %hhu",
+      "UniqueId": "StreamDscpSet",
+      "splitArgs": [
+        {
+          "DefinationEncoding": "p",
+          "MacroVariableName": "arg1"
+        },
+        {
+          "DefinationEncoding": "hhu",
+          "MacroVariableName": "arg3"
+        }
+      ],
+      "macroName": "QuicTraceLogStreamInfo"
+    },
     "StreamError": {
       "ModuleProperites": {},
       "TraceString": "[strm][%p] ERROR, %s.",
@@ -17497,6 +17513,11 @@
         "UniquenessHash": "cfaab7b3-b77b-3a94-a433-4c9b57907696",
         "TraceID": "StreamDestroyed",
         "EncodingString": "[strm][%p] Destroyed"
+      },
+      {
+        "UniquenessHash": "734a2361-aea4-d125-5457-7853e140e422",
+        "TraceID": "StreamDscpSet",
+        "EncodingString": "[strm][%p] Stream DSCP set to %hhu"
       },
       {
         "UniquenessHash": "c3b546cc-e127-435d-8bf4-cf20ca3d2d5e",

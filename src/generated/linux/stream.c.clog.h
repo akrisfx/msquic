@@ -146,6 +146,26 @@ tracepoint(CLOG_STREAM_C, ReliableSendOffsetSet , arg1, arg3);\
 
 
 /*----------------------------------------------------------
+// Decoder Ring for StreamDscpSet
+// [strm][%p] Stream DSCP set to %hhu
+// QuicTraceLogStreamInfo(
+            StreamDscpSet,
+            Stream,
+            "Stream DSCP set to %hhu",
+            Stream->DSCP);
+// arg1 = arg1 = Stream = arg1
+// arg3 = arg3 = Stream->DSCP = arg3
+----------------------------------------------------------*/
+#ifndef _clog_4_ARGS_TRACE_StreamDscpSet
+#define _clog_4_ARGS_TRACE_StreamDscpSet(uniqueId, arg1, encoded_arg_string, arg3)\
+tracepoint(CLOG_STREAM_C, StreamDscpSet , arg1, arg3);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
 // Decoder Ring for ConfiguredForDelayedIDFC
 // [strm][%p] Configured for delayed ID FC updates
 // QuicTraceLogStreamVerbose(

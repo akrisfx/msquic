@@ -963,6 +963,7 @@ typedef struct QUIC_SCHANNEL_CONTEXT_ATTRIBUTE_EX_W {
 #ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
 #define QUIC_PARAM_STREAM_RELIABLE_OFFSET               0x08000005  // uint64_t
 #endif
+#define QUIC_PARAM_STREAM_SEND_DSCP                     0X08000006  // uint8_t
 
 typedef
 _IRQL_requires_max_(PASSIVE_LEVEL)

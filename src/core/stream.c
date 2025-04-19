@@ -693,7 +693,7 @@ QuicStreamParamSet(
         break;
     }
 
-   case QUIC_PARAM_STREAM_RELIABLE_OFFSET:
+    case QUIC_PARAM_STREAM_RELIABLE_OFFSET:
 
         if (BufferLength != sizeof(uint64_t) || Buffer == NULL) {
             Status = QUIC_STATUS_INVALID_PARAMETER;
@@ -741,6 +741,30 @@ QuicStreamParamSet(
             Stream,
             "Reliable send offset set to %llu",
             *(uint64_t*)Buffer);
+
+        Status = QUIC_STATUS_SUCCESS;
+        break;
+
+    case QUIC_PARAM_STREAM_SEND_DSCP:
+        if (BufferLength != sizeof(Stream->DSCP) || Buffer == NULL) {
+            Status = QUIC_STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        uint8_t DSCP = *(uint8_t*)Buffer;
+
+        if (DSCP > CXPLAT_MAX_DSCP) {
+            Status = QUIC_STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        Stream->DSCP = DSCP;
+
+        QuicTraceLogStreamInfo(
+            StreamDscpSet,
+            Stream,
+            "Stream DSCP set to %hhu",
+            Stream->DSCP);
 
         Status = QUIC_STATUS_SUCCESS;
         break;
@@ -940,6 +964,26 @@ QuicStreamParamGet(
             break;
         }
         *(uint64_t*) Buffer = Stream->ReliableOffsetSend;
+        Status = QUIC_STATUS_SUCCESS;
+        break;
+
+    case QUIC_PARAM_STREAM_SEND_DSCP:
+        if (*BufferLength < sizeof(uint8_t)) {
+            *BufferLength = sizeof(uint8_t);
+            Status = QUIC_STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        if (Buffer == NULL) {
+            Status = QUIC_STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        CxPlatCopyMemory(
+            Buffer,
+            &Stream->DSCP,
+            sizeof(Stream->DSCP));
+
+        *BufferLength = sizeof(Stream->DSCP);
         Status = QUIC_STATUS_SUCCESS;
         break;
 

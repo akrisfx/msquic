@@ -290,6 +290,12 @@ typedef struct QUIC_STREAM {
     uint8_t OutFlowBlockedReasons; // Set of QUIC_FLOW_BLOCKED_* flags
 
     //
+    // DSCP value to set on all sends from this stream.
+    // Default value of 0.
+    //
+    uint8_t DSCP;
+
+    //
     // Send State
     //
 

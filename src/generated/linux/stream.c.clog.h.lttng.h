@@ -124,6 +124,29 @@ TRACEPOINT_EVENT(CLOG_STREAM_C, ReliableSendOffsetSet,
 
 
 /*----------------------------------------------------------
+// Decoder Ring for StreamDscpSet
+// [strm][%p] Stream DSCP set to %hhu
+// QuicTraceLogStreamInfo(
+            StreamDscpSet,
+            Stream,
+            "Stream DSCP set to %hhu",
+            Stream->DSCP);
+// arg1 = arg1 = Stream = arg1
+// arg3 = arg3 = Stream->DSCP = arg3
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_STREAM_C, StreamDscpSet,
+    TP_ARGS(
+        const void *, arg1,
+        unsigned char, arg3), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg1, (uint64_t)arg1)
+        ctf_integer(unsigned char, arg3, arg3)
+    )
+)
+
+
+
+/*----------------------------------------------------------
 // Decoder Ring for ConfiguredForDelayedIDFC
 // [strm][%p] Configured for delayed ID FC updates
 // QuicTraceLogStreamVerbose(
