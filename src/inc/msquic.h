@@ -964,6 +964,8 @@ typedef struct QUIC_SCHANNEL_CONTEXT_ATTRIBUTE_EX_W {
 #define QUIC_PARAM_STREAM_RELIABLE_OFFSET               0x08000005  // uint64_t
 #endif
 
+
+//
 typedef
 _IRQL_requires_max_(PASSIVE_LEVEL)
 QUIC_STATUS
