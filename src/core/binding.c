@@ -59,11 +59,18 @@ QuicBindingInitialize(
     Binding->Exclusive = !(UdpConfig->Flags & CXPLAT_SOCKET_FLAG_SHARE);
     Binding->ServerOwned = !!(UdpConfig->Flags & CXPLAT_SOCKET_SERVER_OWNED);
     Binding->Connected = UdpConfig->RemoteAddress == NULL ? FALSE : TRUE;
+    Binding->Partitioned = !!(UdpConfig->Flags & CXPLAT_SOCKET_FLAG_PARTITIONED);
+    if (Binding->Partitioned) {
+        Binding->PartitionIndex = UdpConfig->PartitionIndex;
+    }
     Binding->StatelessOperCount = 0;
     CxPlatDispatchRwLockInitialize(&Binding->RwLock);
     CxPlatDispatchLockInitialize(&Binding->StatelessOperLock);
     CxPlatListInitializeHead(&Binding->Listeners);
     QuicLookupInitialize(&Binding->Lookup);
+#if DEBUG
+    QuicLibraryTrackDbgObject(QUIC_DBG_OBJECT_TYPE_BINDING, &Binding->DbgObjectLink);
+#endif
     if (!CxPlatHashtableInitializeEx(&Binding->StatelessOperTable, CXPLAT_HASH_MIN_SIZE)) {
         Status = QUIC_STATUS_OUT_OF_MEMORY;
         goto Error;
@@ -175,6 +182,9 @@ Error:
             if (HashTableInitialized) {
                 CxPlatHashtableUninitialize(&Binding->StatelessOperTable);
             }
+#if DEBUG
+            QuicLibraryUntrackDbgObject(QUIC_DBG_OBJECT_TYPE_BINDING, &Binding->DbgObjectLink);
+#endif
             CxPlatDispatchLockUninitialize(&Binding->StatelessOperLock);
             CxPlatDispatchRwLockUninitialize(&Binding->RwLock);
             CXPLAT_FREE(Binding, QUIC_POOL_BINDING);
@@ -227,6 +237,9 @@ QuicBindingUninitialize(
     QuicLookupUninitialize(&Binding->Lookup);
     CxPlatDispatchLockUninitialize(&Binding->StatelessOperLock);
     CxPlatHashtableUninitialize(&Binding->StatelessOperTable);
+#if DEBUG
+    QuicLibraryUntrackDbgObject(QUIC_DBG_OBJECT_TYPE_BINDING, &Binding->DbgObjectLink);
+#endif
     CxPlatDispatchRwLockUninitialize(&Binding->RwLock);
 
     QuicTraceEvent(
@@ -297,6 +310,15 @@ QuicBindingGetRemoteAddress(
         Hooks->GetRemoteAddress(Address);
     }
 #endif
+}
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+BOOLEAN
+QuicBindingGetQtipEnabled(
+    _In_ const QUIC_BINDING* Binding
+    )
+{
+    return CxPlatSocketGetQtipEnabled(Binding->Socket);
 }
 
 //
@@ -446,7 +468,7 @@ QuicBindingGetListener(
         FailedAddrMatch = FALSE;
 
         if (QuicListenerMatchesAlpn(ExistingListener, Info)) {
-            if (CxPlatRefIncrementNonZero(&ExistingListener->RefCount, 1)) {
+            if (CxPlatRefIncrementNonZero(&ExistingListener->StartRefCount, 1)) {
                 Listener = ExistingListener;
             }
             goto Done;
@@ -550,7 +572,7 @@ QuicBindingAcceptConnection(
 
 Error:
 
-    QuicListenerRelease(Listener, TRUE);
+    QuicListenerStartRelease(Listener, TRUE);
 }
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -1342,7 +1364,8 @@ Exit:
             Oper->Type = QUIC_OPER_TYPE_API_CALL;
             Oper->API_CALL.Context = &NewConnection->BackupApiContext;
             Oper->API_CALL.Context->Type = QUIC_API_TYPE_CONN_SHUTDOWN;
-            Oper->API_CALL.Context->CONN_SHUTDOWN.Flags = QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT;
+            Oper->API_CALL.Context->CONN_SHUTDOWN.Flags =
+                QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT | QUIC_CONNECTION_SHUTDOWN_FLAG_STATUS;
             Oper->API_CALL.Context->CONN_SHUTDOWN.ErrorCode = (QUIC_VAR_INT)QUIC_STATUS_INTERNAL_ERROR;
             Oper->API_CALL.Context->CONN_SHUTDOWN.RegistrationShutdown = FALSE;
             Oper->API_CALL.Context->CONN_SHUTDOWN.TransportShutdown = TRUE;
@@ -1839,7 +1862,7 @@ QuicBindingHandleDosModeStateChange(
             ListenerLink = ListenerLink->Flink) {
 
         QUIC_LISTENER* Listener = CXPLAT_CONTAINING_RECORD(ListenerLink, QUIC_LISTENER, Link);
-        QuicListenerHandleDosModeStateChange(Listener, DosModeEnabled);
+        QuicListenerHandleDosModeStateChange(Listener, DosModeEnabled, FALSE);
     }
     CxPlatDispatchRwLockReleaseShared(&Binding->RwLock, PrevIrql);
 }

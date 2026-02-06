@@ -40,6 +40,25 @@ typedef struct QUIC_HANDLE {
 
 } QUIC_HANDLE;
 
+#if DEBUG
+
+typedef enum QUIC_DBG_OBJECT_TYPE {
+    QUIC_DBG_OBJECT_TYPE_STREAM,
+    QUIC_DBG_OBJECT_TYPE_BINDING,
+    QUIC_DBG_OBJECT_TYPE_CONNECTION,
+    QUIC_DBG_OBJECT_TYPE_LISTENER,
+    QUIC_DBG_OBJECT_TYPE_REGISTRATION,
+    QUIC_DBG_OBJECT_TYPE_CONFIGURATION,
+    QUIC_DBG_OBJECT_TYPE_MAX
+} QUIC_DBG_OBJECT_TYPE;
+
+typedef struct QUIC_DBG_OBJECT_TRACKER {
+    CXPLAT_LIST_ENTRY List;
+    uint32_t Count;
+} QUIC_DBG_OBJECT_TRACKER;
+
+#endif // DEBUG
+
 //
 // Represents the storage for global library state.
 //
@@ -56,9 +75,21 @@ typedef struct QUIC_LIBRARY {
     BOOLEAN LazyInitComplete : 1;
 
     //
+    // Indicates the app has configured their own execution contexts.
+    //
+    BOOLEAN CustomExecutions : 1;
+
+    //
     // Indicates the app has configured non-default (per-processor) partitioning.
     //
     BOOLEAN CustomPartitions : 1;
+
+    //
+    // Whether the datapath will be initialized with support for DSCP on receive.
+    // As of Windows 26100, requesting DSCP on the receive path causes packets to fall out of
+    // the Windows fast path causing a large performance regression.
+    //
+    BOOLEAN EnableDscpOnRecv : 1;
 
 #ifdef CxPlatVerifierEnabled
     //
@@ -170,7 +201,7 @@ typedef struct QUIC_LIBRARY {
     //
     // Configuration for execution of the library (optionally set by the app).
     //
-    QUIC_EXECUTION_CONFIG* ExecutionConfig;
+    QUIC_GLOBAL_EXECUTION_CONFIG* ExecutionConfig;
 
     //
     // Datapath instance for the library.
@@ -193,15 +224,67 @@ typedef struct QUIC_LIBRARY {
     QUIC_REGISTRATION* StatelessRegistration;
 
     //
+    // Protects all registration close completion fields.
+    CXPLAT_LOCK RegistrationCloseCleanupLock;
+
+    //
+    // Event set when the registration worker needs to wake.
+    //
+    CXPLAT_EVENT RegistrationCloseCleanupEvent;
+
+    //
+    // Set to true to shut down the worker thread.
+    //
+    BOOLEAN RegistrationCloseCleanupShutdown;
+
+    //
+    // A dedicated worker thread to clean up async registration close.
+    //
+    CXPLAT_THREAD RegistrationCloseCleanupWorker;
+
+    //
+    // List of registrations needing asynchronous close completion indications.
+    //
+    CXPLAT_LIST_ENTRY RegistrationCloseCleanupList;
+
+    //
+    // Rundown protection for the registration close cleanup worker.
+    //
+    CXPLAT_RUNDOWN_REF RegistrationCloseCleanupRundown;
+
+    //
     // Per-partition storage. Count of `PartitionCount`.
     //
     _Field_size_(PartitionCount)
     QUIC_PARTITION* Partitions;
 
-    //
-    // The base secret used to generate keys for the stateless retry token.
-    //
-    uint8_t BaseRetrySecret[CXPLAT_AEAD_AES_256_GCM_SIZE];
+    struct {
+        //
+        // Lock protecting the stateless retry configuration.
+        //
+        CXPLAT_DISPATCH_RW_LOCK Lock;
+
+        //
+        // The base secret used to generate keys for the stateless retry token.
+        //
+        uint8_t BaseSecret[CXPLAT_AEAD_MAX_SIZE];
+
+        //
+        // Length of the secret stored in BaseSecret. Depents on the algorithm type.
+        //
+        uint32_t SecretLength;
+
+        //
+        // The AEAD algorithm to use for the retry key.
+        //
+        CXPLAT_AEAD_TYPE AeadAlgorithm;
+
+        //
+        // The number of milliseconds between key rotations.
+        //
+        uint32_t KeyRotationMs;
+
+    } StatelessRetry;
 
     //
     // The Toeplitz hash used for hashing received long header packets.
@@ -233,6 +316,19 @@ typedef struct QUIC_LIBRARY {
     //
     CXPLAT_WORKER_POOL* WorkerPool;
 
+#if DEBUG
+    //
+    // Lock for debug operations.
+    //
+    CXPLAT_DISPATCH_LOCK DbgLock;
+
+    //
+    // Debug object trackers. These contain lists of objects throughout their
+    // entire lifetimes.
+    //
+    QUIC_DBG_OBJECT_TRACKER DbgObjectTrackers[QUIC_DBG_OBJECT_TYPE_MAX];
+#endif
+
 } QUIC_LIBRARY;
 
 extern QUIC_LIBRARY MsQuicLib;
@@ -246,7 +342,7 @@ extern QUIC_LIBRARY MsQuicLib;
 #define QUIC_LIB_VERIFY(Expr)
 #endif
 
-inline
+QUIC_INLINE
 QUIC_PARTITION*
 QuicLibraryGetPartitionFromProcessorIndex(
     uint32_t ProcessorIndex
@@ -280,7 +376,7 @@ QuicLibraryGetPartitionFromProcessorIndex(
 }
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
-inline
+QUIC_INLINE
 QUIC_PARTITION*
 QuicLibraryGetCurrentPartition(
     void
@@ -291,7 +387,7 @@ QuicLibraryGetCurrentPartition(
 }
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
-inline
+QUIC_INLINE
 uint16_t
 QuicPartitionIdCreate(
     uint16_t BaseIndex
@@ -312,7 +408,7 @@ QuicPartitionIdCreate(
 }
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
-inline
+QUIC_INLINE
 uint16_t
 QuicPartitionIdGetIndex(
     uint16_t PartitionId
@@ -330,7 +426,7 @@ QuicPerfCounterSnapShot(
     );
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
-inline
+QUIC_INLINE
 void
 QuicPerfCounterTrySnapShot(
     _In_ uint64_t TimeNow
@@ -357,7 +453,7 @@ QuicPerfCounterTrySnapShot(
 // Creates a random, new source connection ID, that will be used on the receive
 // path.
 //
-inline
+QUIC_INLINE
 _Success_(return != NULL)
 QUIC_CID_HASH_ENTRY*
 QuicCidNewRandomSource(
@@ -416,6 +512,12 @@ _IRQL_requires_max_(PASSIVE_LEVEL)
 QUIC_STATUS
 QuicLibraryLazyInitialize(
     BOOLEAN AcquireLock
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+MsQuicLibraryLazyUninitialize(
+    void
     );
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -536,6 +638,42 @@ QuicLibraryGenerateStatelessResetToken(
     _Out_writes_all_(QUIC_STATELESS_RESET_TOKEN_LENGTH)
         uint8_t* ResetToken
     );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+QUIC_STATUS
+QuicLibrarySetRetryKeyConfig(
+    _In_ const QUIC_STATELESS_RETRY_CONFIG* Config
+    );
+
+#if DEBUG
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+QuicLibraryInitializeDbg(
+    void
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+QuicLibraryUninitializeDbg(
+    void
+    );
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+QuicLibraryTrackDbgObject(
+    QUIC_DBG_OBJECT_TYPE Type,
+    CXPLAT_LIST_ENTRY* ObjectEntry
+    );
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+QuicLibraryUntrackDbgObject(
+    QUIC_DBG_OBJECT_TYPE Type,
+    CXPLAT_LIST_ENTRY* ObjectEntry
+    );
+
+#endif // DEBUG
 
 #if defined(__cplusplus)
 }

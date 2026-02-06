@@ -39,6 +39,7 @@ This table describes all officially supported MsQuic releases.
 | -- | -- | -- | -- | -- | -- | -- |
 | SAC | [release/2.3](https://github.com/microsoft/msquic/tree/release/2.3) | [Windows Server 2025](https://techcommunity.microsoft.com/t5/windows-server-news-and-best/introducing-windows-server-2025/ba-p/4026374)<br>[Windows 11](https://www.microsoft.com/software-download/windows11) | Jan 26 2024 | Mar 12 2024 | Sept 12 2025 | Windows, Linux |
 | SAC | [release/2.4](https://github.com/microsoft/msquic/tree/release/2.4) | [Windows Server 2025](https://techcommunity.microsoft.com/t5/windows-server-news-and-best/introducing-windows-server-2025/ba-p/4026374)<br>[Windows 11](https://www.microsoft.com/software-download/windows11)<br>[.NET 9.0](https://dotnet.microsoft.com/en-us/download/dotnet/9.0) | Aug 5 2024 | Aug 16 2024 | Feb 16 2026 | Windows, Linux |
+| SAC | [release/2.5](https://github.com/microsoft/msquic/tree/release/2.5) | TBD | May 15 2025 | TBD | TBD | Windows, Linux |
 
 <br>\* Future **Release Dates** are subject to change.
 <br>\** **End of Support** dates do not include possible [extended support](https://docs.microsoft.com/en-us/windows-server/get-started-19/servicing-channels-19#long-term-servicing-channel-ltsc) extensions.
@@ -80,23 +81,17 @@ MsQuic may work on other platforms, including macOS, iOS, Android, x86, etc. but
 1. Wait for [msquic-Official-Tests](https://mscodehub.visualstudio.com/msquic/_build?definitionId=1824&_a=summary) pipeline to run for the newly created tag.
 1. Download the `distribution` packages from the artifacts and upload them to the GitHub release:
    - msquic_gamecore_console_x64_Release_schannel.zip
-   - msquic_linux_x64_Release_openssl.zip
-   - msquic_linux_x64_Release_openssl_test.zip
-   - msquic_linux_x64_Release_openssl3.zip
-   - msquic_linux_x64_Release_openssl3_test.zip
-   - msquic_windows_arm64_Release_openssl3.zip
+   - msquic_linux_x64_Release_quictls.zip
+   - msquic_linux_x64_Release_quictls_test.zip
+   - msquic_windows_arm64_Release_quictls.zip
    - msquic_windows_arm64_Release_schannel.zip
-   - msquic_windows_arm_Release_openssl.zip
-   - msquic_windows_arm_Release_openssl3.zip
+   - msquic_windows_arm_Release_quictls.zip
    - msquic_windows_arm_Release_schannel.zip
-   - msquic_windows_x64_Release_openssl.zip
-   - msquic_windows_x64_Release_openssl_test.zip
-   - msquic_windows_x64_Release_openssl3.zip
-   - msquic_windows_x64_Release_openssl3_test.zip
+   - msquic_windows_x64_Release_quictls.zip
+   - msquic_windows_x64_Release_quictls_test.zip
    - msquic_windows_x64_Release_schannel.zip
    - msquic_windows_x64_Release_schannel_test.zip
-   - msquic_windows_x86_Release_openssl.zip
-   - msquic_windows_x86_Release_openssl3.zip
+   - msquic_windows_x86_Release_quictls.zip
    - msquic_windows_x86_Release_schannel.zip
 1. Update (via PR) `main` branch's `test-down-level.yml` to point the newly uploaded `*_test.zip` release binaries.
 
@@ -146,6 +141,8 @@ The following are the complete (manual) steps for publishing the Rust crate.
 
 ## Synchronizing with Windows
 
-1. Once the release branch is created, set the pipeline [here](https://mscodehub.visualstudio.com/msquic/_build?definitionId=1868) to ingest the release branch into Windows, and run it.
-2. When the pipeline passes tests, it'll create a PR.
+1. Once the release branch/tag is created, the undock pipeline should run automatically.
+   - If for some reason there's a problem, you may need to run the pipline manually by clicking on "Run Pipeline" [here](https://microsoft.visualstudio.com/undock/_build?definitionId=134439) (MSFT-only access required), scroll down to the **resources tab** and pick the MsQuic release tag of interest then run the pipeline.
+   - Another workaround to force a manual re-run by going [here](https://microsoft.visualstudio.com/undock/_git/msquic/tags) (MSFT-only access required) and deleting the tag, and then waiting for the [mirror pipeline](https://microsoft.visualstudio.com/undock/_build?definitionId=134727) (MSFT-only access required) to run automatically re-copy over the tag from GitHub.
+2. Once the pipeline passes tests, get the VPACK ID from the "Create VPACK" stage, and create a PR to point [this file](https://microsoft.visualstudio.com/OS/_git/os.2020?path=/minio/netio/quic/msquic/msquic.man) (MSFT-only access required) to the VPACK created by the pipline run.
 3. Review and merge the PR to complete the process.

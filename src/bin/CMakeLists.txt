@@ -20,6 +20,7 @@ if(BUILD_SHARED_LIBS)
     endif()
 else()
     add_library(msquic_static STATIC static/empty.c)
+    set_target_properties(msquic_static PROPERTIES OUTPUT_NAME "${QUIC_LIBRARY_NAME}${CMAKE_DEBUG_POSTFIX}")
     target_link_libraries(msquic_static PRIVATE core msquic_platform inc logging main_binary_link_args)
     target_compile_definitions(msquic_static PUBLIC QUIC_BUILD_STATIC)
     set_property(TARGET msquic_static PROPERTY FOLDER "${QUIC_FOLDER_PREFIX}libraries")
@@ -239,8 +240,21 @@ endif()
 set_property(TARGET msquic PROPERTY FOLDER "${QUIC_FOLDER_PREFIX}libraries")
 
 if(WIN32)
-    SET_TARGET_PROPERTIES(msquic
-        PROPERTIES LINK_FLAGS "/DEF:\"${CMAKE_CURRENT_BINARY_DIR}/msquic.def\"")
+    set(MSQUIC_LINK_FLAGS "/DEF:\"${CMAKE_CURRENT_BINARY_DIR}/msquic.def\"")
+
+    # Indicate CET Shadow Stack support for supported architectures
+    if (${SYSTEM_PROCESSOR} STREQUAL "x64" OR
+        ${SYSTEM_PROCESSOR} STREQUAL "AMD64" OR
+        ${SYSTEM_PROCESSOR} STREQUAL "x86" OR
+        ${SYSTEM_PROCESSOR} STREQUAL "win32")
+
+        string(APPEND MSQUIC_LINK_FLAGS " /CETCOMPAT")
+    endif()
+
+    if(QUIC_CI)
+        string(APPEND MSQUIC_LINK_FLAGS " /PROFILE")
+    endif()
+    SET_TARGET_PROPERTIES(msquic PROPERTIES LINK_FLAGS "${MSQUIC_LINK_FLAGS}")
 elseif (CX_PLATFORM STREQUAL "linux")
     SET_TARGET_PROPERTIES(msquic
         PROPERTIES LINK_FLAGS "-Wl,--version-script=\"${CMAKE_CURRENT_SOURCE_DIR}/linux/exports.txt\"")
@@ -251,7 +265,7 @@ endif()
 
 file(GLOB PUBLIC_HEADERS "../inc/*.h" "../inc/*.hpp")
 
-if(QUIC_TLS STREQUAL "openssl" OR  QUIC_TLS STREQUAL "openssl3")
+if(QUIC_TLS_LIB STREQUAL "quictls" OR QUIC_TLS_LIB STREQUAL "openssl")
     list(APPEND OTHER_TARGETS OpenSSL OpenSSLQuic)
 endif()
 
@@ -281,6 +295,6 @@ if(BUILD_SHARED_LIBS)
     install(EXPORT msquic NAMESPACE msquic:: DESTINATION share/msquic)
 endif()
 
-if (MSVC AND NOT QUIC_ENABLE_SANITIZERS AND BUILD_SHARED_LIBS)
+if (MSVC AND NOT QUIC_SANITIZER_ACTIVE AND BUILD_SHARED_LIBS)
     target_compile_options(msquic PRIVATE /analyze)
 endif()

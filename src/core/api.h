@@ -5,6 +5,39 @@
 
 --*/
 
+//
+// Private flag of the QUIC_CONNECTION_SHUTDOWN_FLAGS enum used for indicating
+// the type of error code being passed in. Not exposed to apps because they
+// should not be using different types of errors directly.
+//
+#define QUIC_CONNECTION_SHUTDOWN_FLAG_STATUS ((QUIC_CONNECTION_SHUTDOWN_FLAGS)0x8000)
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+QUIC_STATUS
+QUIC_API
+MsQuicExecutionCreate(
+    _In_ QUIC_GLOBAL_EXECUTION_CONFIG_FLAGS Flags, // Used for datapath type
+    _In_ uint32_t PollingIdleTimeoutUs,
+    _In_ uint32_t Count,
+    _In_reads_(Count) QUIC_EXECUTION_CONFIG* Configs,
+    _Out_writes_(Count) QUIC_EXECUTION** Executions
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+QUIC_API
+MsQuicExecutionDelete(
+    _In_ uint32_t Count,
+    _In_reads_(Count) QUIC_EXECUTION** Executions
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+uint32_t
+QUIC_API
+MsQuicExecutionPoll(
+    _In_ QUIC_EXECUTION* Execution
+    );
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 QUIC_STATUS
 QUIC_API
@@ -20,6 +53,16 @@ QUIC_API
 MsQuicRegistrationClose(
     _In_ _Pre_defensive_ __drv_freesMem(Mem)
         HQUIC Handle
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+QUIC_API
+MsQuicRegistrationClose2(
+    _In_ _Pre_defensive_ __drv_freesMem(Mem)
+        HQUIC Handle,
+    _In_ _Pre_defensive_ QUIC_REGISTRATION_CLOSE_CALLBACK_HANDLER Handler,
+    _In_opt_ void* Context
     );
 
 _IRQL_requires_max_(DISPATCH_LEVEL)

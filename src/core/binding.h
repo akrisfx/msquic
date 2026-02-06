@@ -211,6 +211,14 @@ typedef struct QUIC_BINDING {
     BOOLEAN Connected : 1;
 
     //
+    // Indicates that the binding is constrained to a single partition. If
+    // partitioned, the binding must indicate all events within the partition,
+    // use the event queue belonging to the partition for IO, and perform its
+    // own processing within the partition's execution context.
+    //
+    BOOLEAN Partitioned : 1;
+
+    //
     // Number of (connection and listener) references to the binding.
     //
     uint32_t RefCount;
@@ -226,6 +234,11 @@ typedef struct QUIC_BINDING {
     //
     QUIC_COMPARTMENT_ID CompartmentId;
 #endif
+
+    //
+    // The partition index, if partitioned.
+    //
+    uint16_t PartitionIndex;
 
     //
     // The datapath binding.
@@ -263,6 +276,13 @@ typedef struct QUIC_BINDING {
         } Recv;
 
     } Stats;
+
+#if DEBUG
+    //
+    // The list entry in the global binding tracker list.
+    //
+    CXPLAT_LIST_ENTRY DbgObjectLink;
+#endif
 
 } QUIC_BINDING;
 
@@ -319,6 +339,15 @@ void
 QuicBindingGetRemoteAddress(
     _In_ QUIC_BINDING* Binding,
     _Out_ QUIC_ADDR* Address
+    );
+
+//
+// Queries the QTIP settings of the binding.
+//
+_IRQL_requires_max_(DISPATCH_LEVEL)
+BOOLEAN
+QuicBindingGetQtipEnabled(
+    _In_ const QUIC_BINDING* Binding
     );
 
 //
@@ -480,7 +509,7 @@ QuicBindingHandleDosModeStateChange(
 //
 // Decrypts the retry token.
 //
-inline
+QUIC_INLINE
 _IRQL_requires_max_(DISPATCH_LEVEL)
 BOOLEAN
 QuicRetryTokenDecrypt(

@@ -86,6 +86,7 @@ QuicConnAlloc(
 
 #if DEBUG
     InterlockedIncrement(&MsQuicLib.ConnectionCount);
+    QuicLibraryTrackDbgObject(QUIC_DBG_OBJECT_TYPE_CONNECTION, &Connection->DbgObjectLink);
 #endif
     QuicPerfCounterIncrement(Connection->Partition, QUIC_PERF_COUNTER_CONN_CREATED);
     QuicPerfCounterIncrement(Connection->Partition, QUIC_PERF_COUNTER_CONN_ACTIVE);
@@ -101,7 +102,8 @@ QuicConnAlloc(
 
     Connection->RefCount = 1;
 #if DEBUG
-    Connection->RefTypeCount[QUIC_CONN_REF_HANDLE_OWNER] = 1;
+    CxPlatRefInitializeMultiple(Connection->RefTypeBiasedCount, QUIC_CONN_REF_COUNT);
+    CxPlatRefIncrement(&Connection->RefTypeBiasedCount[QUIC_CONN_REF_HANDLE_OWNER]);
 #endif
     Connection->PartitionID = PartitionId;
     Connection->State.Allocated = TRUE;
@@ -309,6 +311,11 @@ QuicConnFree(
     )
 {
     QUIC_PARTITION* Partition = Connection->Partition;
+#ifdef QUIC_SILO
+    QUIC_SILO Silo = NULL;
+    QuicConfigurationAttachSilo(Connection->Configuration);
+#endif
+
     CXPLAT_FRE_ASSERT(!Connection->State.Freed);
     CXPLAT_TEL_ASSERT(Connection->RefCount == 0);
     if (Connection->State.ExternalOwner) {
@@ -369,7 +376,16 @@ QuicConnFree(
     QuicDatagramSendShutdown(&Connection->Datagram);
     QuicDatagramUninitialize(&Connection->Datagram);
     if (Connection->Configuration != NULL) {
-        QuicConfigurationRelease(Connection->Configuration);
+#ifdef QUIC_SILO
+        //
+        // Take a ref on the silo before releasing the configuration
+        // to prevent the silo from being destroyed while we are still
+        // holding onto the thread to clean up other stuff for this connection.
+        //
+        Silo = Connection->Configuration->Silo;
+        QuicSiloAddRef(Silo);
+#endif
+        QuicConfigurationRelease(Connection->Configuration, QUIC_CONF_REF_CONNECTION);
         Connection->Configuration = NULL;
     }
     if (Connection->RemoteServerName != NULL) {
@@ -392,12 +408,15 @@ QuicConnFree(
         QuicPerfCounterDecrement(Partition, QUIC_PERF_COUNTER_CONN_CONNECTED);
     }
     if (Connection->Registration != NULL) {
-        CxPlatRundownRelease(&Connection->Registration->Rundown);
+        QuicRegistrationRundownRelease(Connection->Registration, QUIC_REG_REF_CONNECTION);
     }
     if (Connection->CloseReasonPhrase != NULL) {
         CXPLAT_FREE(Connection->CloseReasonPhrase, QUIC_POOL_CLOSE_REASON);
     }
     Connection->State.Freed = TRUE;
+#if DEBUG
+    QuicLibraryUntrackDbgObject(QUIC_DBG_OBJECT_TYPE_CONNECTION, &Connection->DbgObjectLink);
+#endif
     QuicTraceEvent(
         ConnDestroyed,
         "[conn][%p] Destroyed",
@@ -408,6 +427,10 @@ QuicConnFree(
     InterlockedDecrement(&MsQuicLib.ConnectionCount);
 #endif
     QuicPerfCounterDecrement(Partition, QUIC_PERF_COUNTER_CONN_ACTIVE);
+#ifdef QUIC_SILO
+    QuicConfigurationDetachSilo();
+    QuicSiloRelease(Silo);
+#endif
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -431,6 +454,9 @@ QuicConnShutdown(
     if (Flags & QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT ||
         (!Connection->State.Started && QuicConnIsClient(Connection))) {
         CloseFlags |= QUIC_CLOSE_SILENT;
+    }
+    if (Flags & QUIC_CONNECTION_SHUTDOWN_FLAG_STATUS) {
+        CloseFlags |= QUIC_CLOSE_QUIC_STATUS;
     }
 
     QuicConnCloseLocally(Connection, CloseFlags, ErrorCode, NULL);
@@ -473,7 +499,7 @@ QuicConnUnregister(
         CxPlatDispatchLockAcquire(&Connection->Registration->ConnectionLock);
         CxPlatListEntryRemove(&Connection->RegistrationLink);
         CxPlatDispatchLockRelease(&Connection->Registration->ConnectionLock);
-        CxPlatRundownRelease(&Connection->Registration->Rundown);
+        QuicRegistrationRundownRelease(Connection->Registration, QUIC_REG_REF_CONNECTION);
 
         QuicTraceEvent(
             ConnUnregistered,
@@ -495,7 +521,7 @@ QuicConnRegister(
 {
     QuicConnUnregister(Connection);
 
-    if (!CxPlatRundownAcquire(&Registration->Rundown)) {
+    if (!QuicRegistrationRundownAcquire(Registration, QUIC_REG_REF_CONNECTION)) {
         return FALSE;
     }
     Connection->State.Registered = TRUE;
@@ -518,7 +544,7 @@ QuicConnRegister(
     if (RegistrationShuttingDown) {
         Connection->State.Registered = FALSE;
         Connection->Registration = NULL;
-        CxPlatRundownRelease(&Registration->Rundown);
+        QuicRegistrationRundownRelease(Registration, QUIC_REG_REF_CONNECTION);
     } else {
         QuicTraceEvent(
             ConnRegistered,
@@ -702,6 +728,13 @@ QuicConnQueueOper(
     if (!Connection->State.Initialized) {
         CXPLAT_DBG_ASSERT(QuicConnIsServer(Connection));
         CXPLAT_DBG_ASSERT(Connection->SourceCids.Next != NULL || CxPlatIsRandomMemoryFailureEnabled());
+    }
+    if (Oper->Type == QUIC_OPER_TYPE_API_CALL) {
+        if (Oper->API_CALL.Context->Type == QUIC_API_TYPE_CONN_SHUTDOWN) {
+            CXPLAT_DBG_ASSERT(
+                (Oper->API_CALL.Context->CONN_SHUTDOWN.ErrorCode <= QUIC_VAR_INT_MAX) ||
+                (Oper->API_CALL.Context->CONN_SHUTDOWN.Flags & QUIC_CONNECTION_SHUTDOWN_FLAG_STATUS));
+        }
     }
 #endif
     if (QuicOperationEnqueue(&Connection->OperQ, Connection->Partition, Oper)) {
@@ -1443,6 +1476,10 @@ QuicConnTryClose(
     BOOLEAN ClosedRemotely = !!(Flags & QUIC_CLOSE_REMOTE);
     BOOLEAN SilentClose = !!(Flags & QUIC_CLOSE_SILENT);
 
+    CXPLAT_DBG_ASSERT(!(ClosedRemotely && SilentClose));
+
+    Connection->State.ClosedSilently = SilentClose;
+
     if ((ClosedRemotely && Connection->State.ClosedRemotely) ||
         (!ClosedRemotely && Connection->State.ClosedLocally)) {
         //
@@ -1498,6 +1535,7 @@ QuicConnTryClose(
         if (!SilentClose) {
             //
             // Enter 'draining period' to flush out any leftover packets.
+            // During that time, no packet should be sent.
             //
             QuicConnTimerSet(
                 Connection,
@@ -1518,7 +1556,8 @@ QuicConnTryClose(
         if (!SilentClose) {
             //
             // Enter 'closing period' to wait for a (optional) connection close
-            // response.
+            // response. During that time, the connection close will be re-transmitted
+            // when packets are received.
             //
             uint64_t Pto =
                 QuicLossDetectionComputeProbeTimeout(
@@ -1591,6 +1630,7 @@ QuicConnTryClose(
             Connection->CloseErrorCode = QUIC_ERROR_INTERNAL_ERROR;
         } else {
             Connection->CloseStatus = QuicErrorCodeToStatus(ErrorCode);
+            CXPLAT_DBG_ASSERT(ErrorCode <= QUIC_VAR_INT_MAX);
             Connection->CloseErrorCode = ErrorCode;
             if (QuicErrorIsProtocolError(ErrorCode)) {
                 QuicPerfCounterIncrement(
@@ -1840,8 +1880,8 @@ QuicConnStart(
     CXPLAT_UDP_CONFIG UdpConfig = {0};
     UdpConfig.LocalAddress = Connection->State.LocalAddressSet ? &Path->Route.LocalAddress : NULL;
     UdpConfig.RemoteAddress = &Path->Route.RemoteAddress;
-    UdpConfig.Flags = Connection->State.ShareBinding ? CXPLAT_SOCKET_FLAG_SHARE : 0;
-    UdpConfig.InterfaceIndex = Connection->State.LocalInterfaceSet ? (uint32_t)Path->Route.LocalAddress.Ipv6.sin6_scope_id : 0, // NOLINT(google-readability-casting)
+    UdpConfig.Flags = CXPLAT_SOCKET_FLAG_NONE;
+    UdpConfig.InterfaceIndex = Connection->State.LocalInterfaceSet ? (uint32_t)Path->Route.LocalAddress.Ipv6.sin6_scope_id : 0; // NOLINT(google-readability-casting)
     UdpConfig.PartitionIndex = QuicPartitionIdGetIndex(Connection->PartitionID);
 #ifdef QUIC_COMPARTMENT_ID
     UdpConfig.CompartmentId = Configuration->CompartmentId;
@@ -1850,8 +1890,17 @@ QuicConnStart(
     UdpConfig.OwningProcess = Configuration->OwningProcess;
 #endif
 
+    if (Connection->State.ShareBinding) {
+        UdpConfig.Flags |= CXPLAT_SOCKET_FLAG_SHARE;
+    }
+    if (Connection->Settings.XdpEnabled) {
+        UdpConfig.Flags |= CXPLAT_SOCKET_FLAG_XDP;
+    }
     if (Connection->Settings.QTIPEnabled) {
         UdpConfig.Flags |= CXPLAT_SOCKET_FLAG_QTIP;
+    }
+    if (Connection->State.Partitioned) {
+        UdpConfig.Flags |= CXPLAT_SOCKET_FLAG_PARTITIONED;
     }
 
     //
@@ -2034,6 +2083,7 @@ QuicConnSendResumptionTicket(
             AppDataLength,
             AppResumptionData,
             Connection->HandshakeTP,
+            NULL,    // No Careful Resumption data
             AlpnLength,
             Connection->Crypto.TlsState.NegotiatedAlpn + 1,
             &TicketBuffer,
@@ -2092,6 +2142,7 @@ QuicConnRecvResumptionTicket(
                 Connection->Configuration->AlpnList,
                 Connection->Configuration->AlpnListLength,
                 &ResumedTP,
+                NULL,    // No Careful Resumption data
                 &AppData,
                 &AppDataLength);
         if (QUIC_FAILED(Status)) {
@@ -2434,7 +2485,7 @@ QuicConnSetConfiguration(
         "Configuration set, %p",
         Configuration);
 
-    QuicConfigurationAddRef(Configuration);
+    QuicConfigurationAddRef(Configuration, QUIC_CONF_REF_CONNECTION);
     QuicConfigurationAttachSilo(Configuration);
     Connection->Configuration = Configuration;
 
@@ -4398,9 +4449,25 @@ QuicConnRecvFrames(
     BOOLEAN UpdatedFlowControl = FALSE;
     QUIC_ENCRYPT_LEVEL EncryptLevel = QuicKeyTypeToEncryptLevel(Packet->KeyType);
     BOOLEAN Closed = Connection->State.ClosedLocally || Connection->State.ClosedRemotely;
+    const BOOLEAN ClosingState = Connection->State.ClosedLocally && !Connection->State.ClosedRemotely;
     const uint8_t* Payload = Packet->AvailBuffer + Packet->HeaderLength;
     uint16_t PayloadLength = Packet->PayloadLength;
     uint64_t RecvTime = CxPlatTimeUs64();
+
+    //
+    // In closing state, respond to any packet with a new close frame (rate-limited).
+    // Note this excludes the draining state (i.e., ClosedRemotely == TRUE)
+    // in which we should be silent.
+    //
+    if (ClosingState && !Connection->State.ShutdownComplete) {
+        if (RecvTime - Connection->LastCloseResponseTimeUs >= QUIC_CLOSING_RESPONSE_MIN_INTERVAL) {
+            QuicSendSetSendFlag(
+                &Connection->Send,
+                Connection->State.AppClosed ?
+                    QUIC_CONN_SEND_FLAG_APPLICATION_CLOSE :
+                    QUIC_CONN_SEND_FLAG_CONNECTION_CLOSE);
+        }
+    }
 
     if (QuicConnIsClient(Connection) &&
         !Connection->State.GotFirstServerResponse) {
@@ -5544,7 +5611,8 @@ QuicConnRecvDatagramBatch(
             RecvState->ResetIdleTimeout |= Packet->CompletelyValid;
 
             if (Connection->Registration != NULL && !Connection->Registration->NoPartitioning &&
-                Path->IsActive && !Path->PartitionUpdated && Packet->CompletelyValid &&
+                !Path->Binding->Partitioned && !Connection->State.Partitioned && Path->IsActive &&
+                !Path->PartitionUpdated && Packet->CompletelyValid &&
                 (Packets[i]->PartitionIndex % MsQuicLib.PartitionCount) != RecvState->PartitionIndex) {
                 RecvState->PartitionIndex = Packets[i]->PartitionIndex % MsQuicLib.PartitionCount;
                 RecvState->UpdatePartitionId = TRUE;
@@ -5846,6 +5914,11 @@ QuicConnRecvDatagrams(
 
     if (!Connection->State.UpdateWorker && Connection->State.Connected &&
         !Connection->State.ShutdownComplete && RecvState.UpdatePartitionId) {
+        //
+        // Packets were received on a different partition than the one assigned to the connection.
+        // Migrate the connection to a new worker. New CIDs must be generated since the partition
+        // id is encoded in the CID.
+        //
         CXPLAT_DBG_ASSERT(Connection->Registration);
         CXPLAT_DBG_ASSERT(!Connection->Registration->NoPartitioning);
         CXPLAT_DBG_ASSERT(RecvState.PartitionIndex != QuicPartitionIdGetIndex(Connection->PartitionID));
@@ -6228,7 +6301,7 @@ QuicConnParamSet(
             CXPLAT_UDP_CONFIG UdpConfig = {0};
             UdpConfig.LocalAddress = LocalAddress;
             UdpConfig.RemoteAddress = &Connection->Paths[0].Route.RemoteAddress;
-            UdpConfig.Flags = Connection->State.ShareBinding ? CXPLAT_SOCKET_FLAG_SHARE : 0;
+            UdpConfig.Flags = CXPLAT_SOCKET_FLAG_NONE;
             UdpConfig.InterfaceIndex = 0;
 #ifdef QUIC_COMPARTMENT_ID
             UdpConfig.CompartmentId = Connection->Configuration->CompartmentId;
@@ -6236,6 +6309,12 @@ QuicConnParamSet(
 #ifdef QUIC_OWNING_PROCESS
             UdpConfig.OwningProcess = Connection->Configuration->OwningProcess;
 #endif
+            if (Connection->State.ShareBinding) {
+                UdpConfig.Flags |= CXPLAT_SOCKET_FLAG_SHARE;
+            }
+            if (Connection->Settings.XdpEnabled) {
+                UdpConfig.Flags |= CXPLAT_SOCKET_FLAG_XDP;
+            }
             if (Connection->Settings.QTIPEnabled) {
                 UdpConfig.Flags |= CXPLAT_SOCKET_FLAG_QTIP;
             }
@@ -6247,6 +6326,7 @@ QuicConnParamSet(
                 Connection->Paths[0].Binding = OldBinding;
                 break;
             }
+            Connection->Paths[0].Route.State = RouteUnresolved;
             Connection->Paths[0].Route.Queue = NULL;
 
             //
@@ -6663,6 +6743,28 @@ QuicConnParamSet(
         break;
     }
 
+    case QUIC_PARAM_CONN_CLOSE_ASYNC:
+        if (BufferLength != sizeof(BOOLEAN)) {
+            Status = QUIC_STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        if (Connection->State.HandleClosed) {
+            Status = QUIC_STATUS_INVALID_STATE;
+            break;
+        }
+
+        Connection->State.CloseAsync = *(BOOLEAN*)Buffer;
+        Status = QUIC_STATUS_SUCCESS;
+
+        QuicTraceLogConnVerbose(
+            CloseAsyncUpdated,
+            Connection,
+            "Updated CloseAsync to %hhu",
+            Connection->State.CloseAsync);
+
+        break;
+
     //
     // Private
     //
@@ -6871,12 +6973,41 @@ QuicConnGetV2Statistics(
     if (STATISTICS_HAS_FIELD(*StatsLength, SendEcnCongestionCount)) {
         Stats->SendEcnCongestionCount = Connection->Stats.Send.EcnCongestionCount;
     }
-
     if (STATISTICS_HAS_FIELD(*StatsLength, HandshakeHopLimitTTL)) {
         Stats->HandshakeHopLimitTTL = Connection->Stats.Handshake.HandshakeHopLimitTTL;
     }
+    if (STATISTICS_HAS_FIELD(*StatsLength, RttVariance)) {
+        Stats->RttVariance = (uint32_t)Path->RttVariance;
+    }
 
     *StatsLength = CXPLAT_MIN(*StatsLength, sizeof(QUIC_STATISTICS_V2));
+
+    return QUIC_STATUS_SUCCESS;
+}
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+static
+QUIC_STATUS
+QuicConnGetNetworkStatistics(
+    _In_ const QUIC_CONNECTION* Connection,
+    _Inout_ uint32_t* StatsLength,
+    _Out_writes_bytes_opt_(*StatsLength)
+        QUIC_NETWORK_STATISTICS* Stats
+    )
+{
+    if (*StatsLength < sizeof(QUIC_NETWORK_STATISTICS)) {
+        *StatsLength = sizeof(QUIC_NETWORK_STATISTICS);
+        return QUIC_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (Stats == NULL) {
+        return QUIC_STATUS_INVALID_PARAMETER;
+    }
+
+    CxPlatZeroMemory(Stats, sizeof(QUIC_NETWORK_STATISTICS));
+
+    Connection->CongestionControl.QuicCongestionControlGetNetworkStatistics(
+        Connection, &Connection->CongestionControl, Stats);
 
     return QUIC_STATUS_SUCCESS;
 }
@@ -7299,6 +7430,30 @@ QuicConnParamGet(
         Status = QUIC_STATUS_SUCCESS;
         break;
 
+    case QUIC_PARAM_CONN_NETWORK_STATISTICS:
+        Status =
+            QuicConnGetNetworkStatistics(Connection, BufferLength, (QUIC_NETWORK_STATISTICS *)Buffer);
+        break;
+
+    case QUIC_PARAM_CONN_CLOSE_ASYNC:
+
+        if (*BufferLength < sizeof(BOOLEAN)) {
+            *BufferLength = sizeof(BOOLEAN);
+            Status = QUIC_STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        if (Buffer == NULL) {
+            Status = QUIC_STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        *BufferLength = sizeof(BOOLEAN);
+        *(BOOLEAN*)Buffer = Connection->State.CloseAsync;
+
+        Status = QUIC_STATUS_SUCCESS;
+        break;
+
     default:
         Status = QUIC_STATUS_INVALID_PARAMETER;
         break;
@@ -7484,6 +7639,14 @@ QuicConnProcessApiOperation(
 
     case QUIC_API_TYPE_CONN_CLOSE:
         QuicConnCloseHandle(Connection);
+        if (Connection->State.CloseAsync) {
+            CXPLAT_TEL_ASSERT(Connection->State.HandleClosed);
+            //
+            // Release the external reference to the connection for async
+            // completion.
+            //
+            QuicConnRelease(Connection, QUIC_CONN_REF_HANDLE_OWNER);
+        }
         break;
 
     case QUIC_API_TYPE_CONN_SHUTDOWN:

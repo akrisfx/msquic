@@ -2,10 +2,6 @@
 // Licensed under the MIT License.
 
 fn main() {
-    if cfg!(feature = "static") {
-        assert!(cfg!(feature = "src"), "static requires build for src");
-    }
-
     #[cfg(all(feature = "src", feature = "find"))]
     panic!("feature src and find are mutually exclusive");
 
@@ -30,10 +26,12 @@ fn cmake_build() {
         logging_enabled = "on";
     }
 
-    let target = env::var("TARGET").unwrap();
-    let out_dir = env::var("OUT_DIR").unwrap();
+    let target = env::var("TARGET").unwrap().replace("\\", "/");
+    let out_dir = env::var("OUT_DIR").unwrap().replace("\\", "/");
     // The output directory for the native MsQuic library.
-    let quic_output_dir = Path::new(&out_dir).join("lib");
+    let libdir = "/lib";
+    let full_out_dir = [out_dir, libdir.to_string()].join("");
+    let quic_output_dir = Path::new(&full_out_dir);
 
     // Builds the native MsQuic and installs it into $OUT_DIR.
     let mut config = Config::new(".");
@@ -43,15 +41,22 @@ fn cmake_build() {
 
     // Disable parallel builds on Windows, as they seems to break manifest builds.
     if cfg!(windows) {
-        env::set_var("CMAKE_BUILD_PARALLEL_LEVEL", "1");
+        // cmake-rs uses this cargo env var to pass "--parallel" arg to cmake
+        std::env::remove_var("NUM_JOBS");
     }
 
     // By default enable schannel on windows, unless openssl feature is selected.
-    if cfg!(windows) && !cfg!(feature = "openssl") {
-        config.define("QUIC_TLS", "schannel");
+    if cfg!(feature = "quictls") {
+        config.define("QUIC_TLS_LIB", "quictls");
+    } else if cfg!(feature = "openssl") {
+        config.define("QUIC_TLS_LIB", "openssl");
+    } else if cfg!(windows) {
+        config.define("QUIC_TLS_LIB", "schannel");
     } else {
-        config.define("QUIC_TLS", "openssl");
+        // Default to quictls
+        config.define("QUIC_TLS_LIB", "quictls");
     }
+
     if cfg!(feature = "static") {
         config.define("QUIC_BUILD_SHARED", "off");
     }
@@ -78,15 +83,14 @@ fn cmake_build() {
             let numa_lib_path = match target.as_str() {
                 "x86_64-unknown-linux-gnu" => "/usr/lib/x86_64-linux-gnu",
                 "aarch64-unknown-linux-gnu" => "/usr/lib/aarch64-linux-gnu",
-                _ => panic!("Unsupported target: {}", target),
+                _ => panic!("Unsupported target: {target}"),
             };
-            println!("cargo:rustc-link-search=native={}", numa_lib_path);
+            println!("cargo:rustc-link-search=native={numa_lib_path}");
             println!("cargo:rustc-link-lib=static:+whole-archive=numa");
         } else if cfg!(target_os = "macos") {
             println!("cargo:rustc-link-lib=framework=CoreFoundation");
             println!("cargo:rustc-link-lib=framework=Security");
         }
-        println!("cargo:rustc-link-lib=static=msquic");
     }
 }
 

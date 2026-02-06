@@ -34,6 +34,21 @@ QuicSendInitialize(
 {
     CxPlatListInitializeHead(&Send->SendStreams);
     Send->MaxData = Settings->ConnFlowControlWindow;
+    Send->SkippedPacketNumber = UINT64_MAX;
+
+    //
+    // Randomize initial packet number between 0 and 256 for improved security.
+    // This makes it harder for attackers to predict packet numbers.
+    //
+    uint8_t RandomValue = 0;
+    CxPlatRandom(sizeof(RandomValue), &RandomValue);
+    Send->NextPacketNumber = RandomValue;
+
+    //
+    // Randomly skip a packet number (from 0 to 256).
+    //
+    CxPlatRandom(sizeof(RandomValue), &RandomValue);
+    Send->NextSkippedPacketNumber = Send->NextPacketNumber + RandomValue;
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -284,11 +299,11 @@ QuicSendSetSendFlag(
 {
     QUIC_CONNECTION* Connection = QuicSendGetConnection(Send);
 
-    BOOLEAN IsCloseFrame =
+    const BOOLEAN IsCloseFrame =
         !!(SendFlags & (QUIC_CONN_SEND_FLAG_CONNECTION_CLOSE | QUIC_CONN_SEND_FLAG_APPLICATION_CLOSE));
 
-    BOOLEAN CanSetFlag =
-        !QuicConnIsClosed(Connection) || IsCloseFrame;
+    const BOOLEAN CanSetFlag =
+        !QuicConnIsClosed(Connection) || (!Connection->State.ClosedSilently && IsCloseFrame);
 
     if (SendFlags & QUIC_CONN_SEND_FLAG_ACK && Send->DelayedAckTimerActive) {
         QuicConnTimerCancel(Connection, QUIC_CONN_TIMER_ACK_DELAY);
@@ -299,14 +314,16 @@ QuicSendSetSendFlag(
         QuicTraceLogConnVerbose(
             ScheduleSendFlags,
             Connection,
-            "Scheduling flags 0x%x to 0x%x",
+            "Adding send flags 0x%x (prev: 0x%x, new: 0x%x)",
             SendFlags,
-            Send->SendFlags);
+            Send->SendFlags,
+            Send->SendFlags | SendFlags);
         Send->SendFlags |= SendFlags;
         QuicSendQueueFlush(Send, REASON_CONNECTION_FLAGS);
     }
 
     if (IsCloseFrame) {
+        Connection->LastCloseResponseTimeUs = CxPlatTimeUs64();
         QuicSendClear(Send);
     }
 

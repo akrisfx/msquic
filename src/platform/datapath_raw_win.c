@@ -5,7 +5,7 @@
 
 Abstract:
 
-    QUIC Raw (i.e. DPDK or XDP) Datapath Implementation (User Mode)
+    QUIC Raw (e.g., XDP) Datapath Implementation (User Mode)
 
 --*/
 
@@ -123,38 +123,47 @@ RawSocketCreateUdp(
         memcpy(Socket->CibirId, Config->CibirId, Config->CibirIdLength);
     }
 
-    if (Config->RemoteAddress) {
-        CXPLAT_FRE_ASSERT(!QuicAddrIsWildCard(Config->RemoteAddress));  // No wildcard remote addresses allowed.
-        if (Socket->ReserveAuxTcpSock) {
-            Socket->RemoteAddress = *Config->RemoteAddress;
-        }
-        Socket->Connected = TRUE;
-    }
+    //
+    // The socket addresses have been set in the SocketCreateUdp call earlier,
+    // either form the config or assigned by the OS (for unspecified ports).
+    // Do no override them from the config here: we need to keep the same OS assigned ports if the
+    // config doesn't specify them.
+    //
+    CXPLAT_DBG_ASSERT(
+        Config->RemoteAddress == NULL ||
+        QuicAddrCompare(&Socket->RemoteAddress, Config->RemoteAddress));
+    CXPLAT_DBG_ASSERT(
+        Config->LocalAddress == NULL ||
+        QuicAddrGetPort(Config->LocalAddress) == 0 ||
+        QuicAddrGetPort(&Socket->LocalAddress) == QuicAddrGetPort(Config->LocalAddress));
 
-    if (Config->LocalAddress) {
-        if (Socket->ReserveAuxTcpSock) {
-            Socket->LocalAddress = *Config->LocalAddress;
-        }
-        if (QuicAddrIsWildCard(Config->LocalAddress)) {
-            if (!Socket->Connected) {
-                Socket->Wildcard = TRUE;
-            }
-        } else if (!Socket->Connected) {
-            // Assumes only connected sockets fully specify local address
+    if (Config->RemoteAddress) {
+        //
+        // This CxPlatSocket is part of a client connection.
+        //
+        CXPLAT_FRE_ASSERT(!QuicAddrIsWildCard(Config->RemoteAddress));  // No wildcard remote addresses allowed.
+
+        Socket->Connected = TRUE;
+    } else {
+        //
+        // This CxPlatSocket is part of a server listener.
+        //
+        CXPLAT_FRE_ASSERT(Config->LocalAddress != NULL);
+
+        if (!QuicAddrIsWildCard(Config->LocalAddress)) { // For server listeners, the local address MUST be a wildcard address.
             Status = QUIC_STATUS_INVALID_STATE;
             goto Error;
         }
-    } else {
-        if (Socket->ReserveAuxTcpSock) {
-            QuicAddrSetFamily(&Socket->LocalAddress, QUIC_ADDRESS_FAMILY_INET6);
-        }
-        if (!Socket->Connected) {
-            Socket->Wildcard = TRUE;
-        }
+        Socket->Wildcard = TRUE;
     }
 
+    //
+    // Note here that the socket COULD have local address be a wildcard AND Socket->Wildcard == FALSE.
+    // Socket->Wildcard is TRUE if and only if the socket is part of a server listener (which implies it has a wildcard local address).
+    //
+
     CXPLAT_FRE_ASSERT(Socket->Wildcard ^ Socket->Connected); // Assumes either a pure wildcard listener or a
-                                                                         // connected socket; not both.
+                                                             // connected socket; not both.
 
     Status = CxPlatTryAddSocket(&Raw->SocketPool, Socket);
     if (QUIC_FAILED(Status)) {

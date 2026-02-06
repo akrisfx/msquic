@@ -72,26 +72,6 @@ struct CallbackContext {
     CXPLAT_EVENT Event;
 };
 
-struct StrBuffer
-{
-    uint8_t* Data;
-    uint16_t Length;
-
-    StrBuffer(const char* HexBytes)
-    {
-        Length = (uint16_t)(strlen(HexBytes) / 2);
-        Data = new uint8_t[Length];
-
-        for (uint16_t i = 0; i < Length; ++i) {
-            Data[i] =
-                (DecodeHexChar(HexBytes[i * 2]) << 4) |
-                DecodeHexChar(HexBytes[i * 2 + 1]);
-        }
-    }
-
-    ~StrBuffer() { delete [] Data; }
-};
-
 _IRQL_requires_max_(DISPATCH_LEVEL)
 _Function_class_(CXPLAT_DATAPATH_RECEIVE_CALLBACK)
 void
@@ -362,7 +342,7 @@ CXPLAT_THREAD_CALLBACK(RunAttackThread, /* Context */)
     CXPLAT_UDP_CONFIG UdpConfig = {0};
     UdpConfig.LocalAddress = nullptr;
     UdpConfig.RemoteAddress = &ServerAddress;
-    UdpConfig.Flags = 0;
+    UdpConfig.Flags = CXPLAT_SOCKET_FLAG_NONE;
     UdpConfig.InterfaceIndex = 0;
     UdpConfig.CallbackContext = nullptr;
     QUIC_STATUS Status =
@@ -455,21 +435,16 @@ main(
             UdpRecvCallback,
             UdpUnreachCallback,
         };
-        // flag
-        QUIC_EXECUTION_CONFIG_FLAGS Flags = QUIC_EXECUTION_CONFIG_FLAG_XDP;
-
-        QUIC_EXECUTION_CONFIG DatapathFlags = {
-            Flags,
-        };
         CxPlatSystemLoad();
         CxPlatInitialize();
-        CXPLAT_WORKER_POOL* WorkerPool = CxPlatWorkerPoolCreate(nullptr);
+        CXPLAT_WORKER_POOL* WorkerPool = CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
+        CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
         CxPlatDataPathInitialize(
             0,
             &DatapathCallbacks,
             NULL,
             WorkerPool,
-            &DatapathFlags,
+            &InitConfig,
             &Datapath);
 
         TryGetValue(argc, argv, "ip", &IpAddress);
@@ -512,7 +487,7 @@ main(
 
         Error:
         CxPlatDataPathUninitialize(Datapath);
-        CxPlatWorkerPoolDelete(WorkerPool);
+        CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
         CxPlatUninitialize();
         CxPlatSystemUnload();
     }

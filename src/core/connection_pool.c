@@ -5,8 +5,25 @@
 
 Abstract:
 
-    Definitions for the MsQuic Connection Pool API, which allows clients to
-    create a pool of connections that are spread across RSS cores.
+    Connection pools allow client application to create a pool of connections
+    spread across RSS cores.
+
+    To create connection spread over RSS cores, the connection pool tries multiple
+    port numbers, until the connection lands on a new RSS core. To know where a
+    connection will land, the connection pool compute the RSS core based on the
+    connection parameters. To do so, it needs to query the driver RSS configuration,
+    and use the exact same RSS hash algorithm.
+
+    There is also a chance that a port number found by the connection pool is not
+    available, preventing the connection from starting successfully. To work around
+    this, the connection pool starts connection imediately, and retries with a different
+    port on failure. Special care is taken to avoid any app notification on a connection
+    that will not be in the final pool. Note that a connection might still fail to start
+    for other reasons and be kept in the pool (no guarantee that all connection in the
+    pool are successful).
+
+    Connection pools are currently only supported on Windows XDP datapath,
+    since this is the only datapath that supports querying the RSS configuration parameters.
 
 --*/
 
@@ -103,7 +120,7 @@ QuicConnPoolGetRssProcForTuple(
     )
 {
     //
-    // Calculate the Toeplitz Hash as if receiving packets from
+    // Calculate the RSS Hash in the same way a NIC/miniport would when receiving packets from
     // RemoteAddress to find the RSS processor.
     //
     uint32_t RssHash = 0, Offset;
@@ -158,15 +175,13 @@ QUIC_STATUS
 QuicConnPoolGetStartingLocalAddress(
     _In_ QUIC_ADDR* RemoteAddress,
     _Out_ QUIC_ADDR* LocalAddress,
-    _In_ BOOLEAN UseQTIP
+    _In_ CXPLAT_SOCKET_FLAGS SocketFlags
     )
 {
     CXPLAT_SOCKET* Socket = NULL;
     CXPLAT_UDP_CONFIG UdpConfig;
     CxPlatZeroMemory(&UdpConfig, sizeof(UdpConfig));
-    if (UseQTIP) {
-        UdpConfig.Flags |= CXPLAT_SOCKET_FLAG_QTIP;
-    }
+    UdpConfig.Flags = SocketFlags;
     UdpConfig.RemoteAddress = RemoteAddress;
     QUIC_STATUS Status =
         CxPlatSocketCreateUdp(MsQuicLib.Datapath, &UdpConfig, &Socket);
@@ -220,6 +235,40 @@ QuicConnPoolGetInterfaceIndexForLocalAddress(
 
     return Status;
 }
+
+//
+// Queue a close operation on the connection worker thread,
+// optionally waiting for its completion.
+//
+static
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+QuicConnPoolQueueConnectionClose(
+    _In_ QUIC_CONNECTION* Connection,
+    _In_ const BOOLEAN WaitForCompletion
+    )
+{
+    CXPLAT_EVENT CompletionEvent = {0};
+
+    Connection->CloseOper.Type = QUIC_OPER_TYPE_API_CALL;
+    Connection->CloseOper.FreeAfterProcess = FALSE;
+    Connection->CloseOper.API_CALL.Context = &Connection->CloseApiContext;
+    Connection->CloseApiContext.Type = QUIC_API_TYPE_CONN_CLOSE;
+    Connection->CloseApiContext.Status = NULL;
+
+    if (WaitForCompletion) {
+        CxPlatEventInitialize(&CompletionEvent, TRUE, FALSE);
+        Connection->CloseApiContext.Completed = &CompletionEvent;
+    }
+
+    QuicConnQueueOper(Connection, &Connection->CloseOper);
+
+    if (WaitForCompletion) {
+        CxPlatEventWaitForever(CompletionEvent);
+        CxPlatEventUninitialize(CompletionEvent);
+    }
+}
+
 
 static
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -344,11 +393,12 @@ Error:
 
     if (QUIC_FAILED(Status) && *Connection != NULL) {
         //
-        // This connection has never left MsQuic back to the application,
-        // so don't send any notifications to the application on close.
+        // This connection has never left MsQuic back to the application.
+        // Mark it as internally owned so no notification is sent to the app,
+        // the closing logic will handle the final deref.
         //
         (*Connection)->State.ExternalOwner = FALSE;
-        MsQuicConnectionClose((HQUIC)*Connection);
+        QuicConnPoolQueueConnectionClose(*Connection, FALSE);
         *Connection = NULL;
     }
 
@@ -462,17 +512,37 @@ MsQuicConnectionPoolCreate(
     // Copying how Connection Settings flow downwards. It will first inherit the global settings,
     // if a global setting field is not set, but the configuration setting is set, override the global.
     //
-    BOOLEAN UseQTIP = MsQuicLib.Settings.QTIPEnabled;
-    if (!MsQuicLib.Settings.IsSet.QTIPEnabled
-        && ((QUIC_CONFIGURATION*) Config->Configuration)->Settings.IsSet.QTIPEnabled) {
-        UseQTIP = ((QUIC_CONFIGURATION*) Config->Configuration)->Settings.QTIPEnabled;
+    QUIC_CONFIGURATION* ConnectionConfig =
+        (QUIC_CONFIGURATION*)Config->Configuration;
+    CXPLAT_SOCKET_FLAGS SocketFlags = CXPLAT_SOCKET_FLAG_NONE;
+
+    if (MsQuicLib.Settings.XdpEnabled) {
+        SocketFlags |= CXPLAT_SOCKET_FLAG_XDP;
+    }
+    if (ConnectionConfig->Settings.IsSet.XdpEnabled) {
+        if (ConnectionConfig->Settings.XdpEnabled) {
+            SocketFlags |= CXPLAT_SOCKET_FLAG_XDP;
+        } else {
+            SocketFlags &= ~CXPLAT_SOCKET_FLAG_XDP;
+        }
+    }
+
+    if (MsQuicLib.Settings.QTIPEnabled) {
+        SocketFlags |= CXPLAT_SOCKET_FLAG_QTIP;
+    }
+    if (ConnectionConfig->Settings.IsSet.QTIPEnabled) {
+        if (ConnectionConfig->Settings.QTIPEnabled) {
+            SocketFlags |= CXPLAT_SOCKET_FLAG_QTIP;
+        } else {
+            SocketFlags &= ~CXPLAT_SOCKET_FLAG_QTIP;
+        }
     }
 
     //
     // Get the local address and a port to start from.
     //
     QUIC_ADDR LocalAddress;
-    Status = QuicConnPoolGetStartingLocalAddress(&ResolvedRemoteAddress, &LocalAddress, UseQTIP);
+    Status = QuicConnPoolGetStartingLocalAddress(&ResolvedRemoteAddress, &LocalAddress, SocketFlags);
     if (QUIC_FAILED(Status)) {
         goto Error;
     }
@@ -638,13 +708,21 @@ MsQuicConnectionPoolCreate(
     }
 
 CleanUpConnections:
-if (QUIC_FAILED(Status) &&
-    (Config->Flags & QUIC_CONNECTION_POOL_FLAG_CLOSE_ON_FAILURE) != 0) {
-    for (uint32_t i = 0; i < CreatedConnections; i++) {
-        MsQuicConnectionClose((HQUIC)Connections[i]);
-        Connections[i] = NULL;
+    if (QUIC_FAILED(Status) &&
+        (Config->Flags & QUIC_CONNECTION_POOL_FLAG_CLOSE_ON_FAILURE) != 0) {
+
+        //
+        // Close every connection that was created.
+        // The application will receive the shutdown notification.
+        // Wait for the task to complete so that when this function returns to the app,
+        // all connections are already closed (since the shutdown notification is visible).
+        //
+        for (uint32_t i = 0; i < CreatedConnections; i++) {
+            QuicConnPoolQueueConnectionClose(Connections[i], TRUE);
+            QuicConnRelease(Connections[i], QUIC_CONN_REF_HANDLE_OWNER);
+            Connections[i] = NULL;
+        }
     }
-}
 
 Error:
     if (ServerNameCopy != NULL) {

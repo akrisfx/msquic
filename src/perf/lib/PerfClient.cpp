@@ -145,7 +145,6 @@ PerfClient::Init(
     //
 
     TryGetValue(argc, argv, "tcp", &UseTCP);
-    TryGetValue(argc, argv, "qtip", &UseQtip);
     TryGetValue(argc, argv, "encrypt", &UseEncryption);
     TryGetValue(argc, argv, "pacing", &UsePacing);
     TryGetValue(argc, argv, "sendbuf", &UseSendBuffering);
@@ -229,20 +228,24 @@ PerfClient::Init(
                 PerfClientConnection::TcpSendCompleteCallback,
                 TcpDefaultExecutionProfile)); // Client defaults to using LowLatency profile
     } else {
-        if (UseSendBuffering || !UsePacing || UseQtip) { // Update settings if non-default
-            MsQuicSettings Settings;
-            Configuration.GetSettings(Settings);
-            if (UseSendBuffering) {
-                Settings.SetSendBufferingEnabled(UseSendBuffering != 0);
-            }
-            if (!UsePacing) {
-                Settings.SetPacingEnabled(UsePacing != 0);
-            }
-            if (UseQtip) {
-                Settings.SetQtipEnabled(UseQtip != 0);
-            }
-            Configuration.SetSettings(Settings);
+        MsQuicSettings Settings;
+        Settings.SetSendBufferingEnabled(UseSendBuffering != 0);
+        Settings.SetPacingEnabled(UsePacing != 0);
+        const char* IoMode = GetValue(argc, argv, "io");
+        if (IoMode && IsValue(IoMode, "xdp")) {
+            Settings.SetXdpEnabled(true);
         }
+        if (IoMode && IsValue(IoMode, "qtip")) {
+            Settings.SetXdpEnabled(true);
+            Settings.SetQtipEnabled(true);
+        }
+#ifndef CXPLAT_USE_IO_URING
+        if (IoMode && IsValue(IoMode, "iouring")) {
+            WriteOutput("iouring is not supported on this build\n");
+            return QUIC_STATUS_NOT_SUPPORTED;
+        }
+#endif
+        Configuration.SetSettings(Settings);
     }
 
     //
@@ -392,7 +395,7 @@ PerfClient::Wait(
             WriteOutput("Result: Download %llu kbps.\n", DownloadRate);
         }
 
-    } else if (!PrintThroughput && !PrintLatency) {
+    } else if (!PrintConnThroughput && !PrintLatency) {
         if (CompletedConnections && CompletedStreams) {
             WriteOutput(
                 "Completed %llu connections and %llu streams!\n",
@@ -530,6 +533,20 @@ PerfClientConnection::Initialize() {
                     &Value);
             if (QUIC_FAILED(Status)) {
                 WriteOutput("SetDisable1RttEncryption failed, 0x%x\n", Status);
+                Worker.ConnectionPool.Free(this);
+                return;
+            }
+        }
+
+        if (PerfDefaultDscpValue != 0) {
+            Status =
+                MsQuic->SetParam(
+                    Handle,
+                    QUIC_PARAM_CONN_SEND_DSCP,
+                    sizeof(PerfDefaultDscpValue),
+                    &PerfDefaultDscpValue);
+            if (QUIC_FAILED(Status)) {
+                WriteOutput("SetSendDscp failed, 0x%x\n", Status);
                 Worker.ConnectionPool.Free(this);
                 return;
             }

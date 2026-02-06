@@ -112,8 +112,7 @@ QUIC_STATUS
 CxPlatDpRawInitialize(
     _Inout_ CXPLAT_DATAPATH_RAW* Datapath,
     _In_ uint32_t ClientRecvContextLength,
-    _In_ CXPLAT_WORKER_POOL* WorkerPool,
-    _In_opt_ const QUIC_EXECUTION_CONFIG* Config
+    _In_ CXPLAT_WORKER_POOL* WorkerPool
     );
 
 //
@@ -135,13 +134,13 @@ CxPlatDataPathUninitializeComplete(
     );
 
 //
-// Updates the datapath configuration.
+// Updates the datapath polling idle timeout.
 //
 _IRQL_requires_max_(PASSIVE_LEVEL)
 void
-CxPlatDpRawUpdateConfig(
+CxPlatDpRawUpdatePollingIdleTimeout(
     _In_ CXPLAT_DATAPATH_RAW* Datapath,
-    _In_ QUIC_EXECUTION_CONFIG* Config
+    _In_ uint32_t PollingIdleTimeoutUs
     );
 
 //
@@ -171,7 +170,27 @@ CxPlatDpRawAssignQueue(
 _IRQL_requires_max_(DISPATCH_LEVEL)
 const CXPLAT_INTERFACE*
 CxPlatDpRawGetInterfaceFromQueue(
-    _In_ const void* Queue
+    _In_ const CXPLAT_QUEUE* Queue
+    );
+
+//
+// Returns whether the L3 (i.e., network) layer transmit checksum offload is
+// enabled on the queue.
+//
+_IRQL_requires_max_(DISPATCH_LEVEL)
+BOOLEAN
+CxPlatDpRawIsL3TxXsumOffloadedOnQueue(
+    _In_ const CXPLAT_QUEUE* Queue
+    );
+
+//
+// Returns whether the L3 (i.e., transport) layer transmit checksum offload is
+// enabled on the queue.
+//
+_IRQL_requires_max_(DISPATCH_LEVEL)
+BOOLEAN
+CxPlatDpRawIsL4TxXsumOffloadedOnQueue(
+    _In_ const CXPLAT_QUEUE* Queue
     );
 
 typedef struct HEADER_BACKFILL {
@@ -252,6 +271,27 @@ CxPlatDpRawTxEnqueue(
     );
 
 //
+// Sets the TX send object to have the specified L3 checksum offload settings.
+//
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+CxPlatDpRawTxSetL3ChecksumOffload(
+    _In_ CXPLAT_SEND_DATA* SendData
+    );
+
+//
+// Sets the TX send object to have the specified L4 checksum offload settings.
+//
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+CxPlatDpRawTxSetL4ChecksumOffload(
+    _In_ CXPLAT_SEND_DATA* SendData,
+    _In_ BOOLEAN IsIpv6,
+    _In_ BOOLEAN IsTcp,
+    _In_ uint8_t L4HeaderLength
+    );
+
+//
 // Raw Socket Interface
 //
 
@@ -289,26 +329,34 @@ CxPlatSockPoolUninitialize(
 // conjunction with the hash table lookup, which already compares local UDP port
 // so it assumes that matches already.
 //
-static inline
+QUIC_INLINE
 BOOLEAN
 CxPlatSocketCompare(
     _In_ CXPLAT_SOCKET_RAW* Socket,
     _In_ const QUIC_ADDR* LocalAddress,
-    _In_ const QUIC_ADDR* RemoteAddress
+    _In_ const QUIC_ADDR* RemoteAddress,
+    _In_ const BOOLEAN UseQtip
     )
 {
     CXPLAT_DBG_ASSERT(QuicAddrGetPort(&Socket->LocalAddress) == QuicAddrGetPort(LocalAddress));
     if (Socket->Wildcard) {
-        return TRUE; // The local port match is all that is needed.
+        //
+        // For a listener socket, always give a match if the listener
+        // socket has enabled QTIP (can accept both UDP/QTIP traffic).
+        // Otherwise, we want to NOT match if UseQtip is TRUE but the listener socket does not enable QTIP.
+        //
+        return Socket->ReserveAuxTcpSock || !UseQtip;
     }
 
     //
-    // Make sure the local IP matches and the full remote address matches.
+    // For a client socket, make sure the local IP matches and the full
+    // remote address matches along with QTIP settings.
     //
     CXPLAT_DBG_ASSERT(Socket->Connected);
     return
         QuicAddrCompareIp(&Socket->LocalAddress, LocalAddress) &&
-        QuicAddrCompare(&Socket->RemoteAddress, RemoteAddress);
+        QuicAddrCompare(&Socket->RemoteAddress, RemoteAddress) &&
+        Socket->ReserveAuxTcpSock == UseQtip;
 }
 
 //
@@ -318,7 +366,8 @@ CXPLAT_SOCKET_RAW*
 CxPlatGetSocket(
     _In_ const CXPLAT_SOCKET_POOL* Pool,
     _In_ const QUIC_ADDR* LocalAddress,
-    _In_ const QUIC_ADDR* RemoteAddress
+    _In_ const QUIC_ADDR* RemoteAddress,
+    _In_ const BOOLEAN UseQtip
     );
 
 QUIC_STATUS
@@ -373,6 +422,7 @@ void
 CxPlatFramingWriteHeaders(
     _In_ CXPLAT_SOCKET_RAW* Socket,
     _In_ const CXPLAT_ROUTE* Route,
+    _Inout_ CXPLAT_SEND_DATA* SendData,
     _Inout_ QUIC_BUFFER* Buffer,
     _In_ CXPLAT_ECN_TYPE ECN,
     _In_ uint8_t DSCP,

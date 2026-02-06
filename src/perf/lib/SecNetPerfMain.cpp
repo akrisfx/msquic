@@ -29,6 +29,7 @@ uint8_t PerfDefaultEcnEnabled = false;
 uint8_t PerfDefaultQeoAllowed = false;
 uint8_t PerfDefaultHighPriority = false;
 uint8_t PerfDefaultAffinitizeThreads = false;
+uint8_t PerfDefaultDscpValue = 0;
 
 #ifdef _KERNEL_MODE
 volatile int BufferCurrent;
@@ -134,7 +135,7 @@ PrintHelp(
         "  -qeo:<0/1>               Allows/disallowes QUIC encryption offload. (def:0)\n"
 #ifndef _KERNEL_MODE
         "  -io:<mode>               Configures a requested network IO model to be used.\n"
-        "                            - {iocp, rio, xdp, qtip, epoll, kqueue}\n"
+        "                            - {iocp, xdp, qtip, epoll, iouring, kqueue}\n"
 #else
         "  -io:<mode>               Configures a requested network IO model to be used.\n"
         "                            - {wsk}\n"
@@ -142,6 +143,7 @@ PrintHelp(
         "  -cpu:<cpu_index>         Specify the processor(s) to use.\n"
         "  -cipher:<value>          Decimal value of 1 or more QUIC_ALLOWED_CIPHER_SUITE_FLAGS.\n"
         "  -highpri:<0/1>           Configures MsQuic to run threads at high priority. (def:0)\n"
+        "  -dscp:<0-63>             Specify DSCP value to mark sent packets with. (def:0)\n"
         "\n",
         PERF_DEFAULT_PORT,
         PERF_DEFAULT_PORT
@@ -177,24 +179,21 @@ QuicMainStart(
         return Status;
     }
 
-    uint8_t RawConfig[QUIC_EXECUTION_CONFIG_MIN_SIZE + 256 * sizeof(uint16_t)] = {0};
-    QUIC_EXECUTION_CONFIG* Config = (QUIC_EXECUTION_CONFIG*)RawConfig;
+    uint8_t RawConfig[QUIC_GLOBAL_EXECUTION_CONFIG_MIN_SIZE + 256 * sizeof(uint16_t)] = {0};
+    QUIC_GLOBAL_EXECUTION_CONFIG* Config = (QUIC_GLOBAL_EXECUTION_CONFIG*)RawConfig;
     Config->PollingIdleTimeoutUs = 0; // Default to no polling.
     bool SetConfig = false;
+
     const char* IoMode = GetValue(argc, argv, "io");
-
-#ifndef _KERNEL_MODE
-
-    if (IoMode && IsValue(IoMode, "rio")) {
-        Config->Flags |= QUIC_EXECUTION_CONFIG_FLAG_RIO;
-        SetConfig = true;
-    }
-
-#endif // _KERNEL_MODE
-
-    if (IoMode && IsValue(IoMode, "xdp")) {
-        Config->Flags |= QUIC_EXECUTION_CONFIG_FLAG_XDP;
-        SetConfig = true;
+    if (IoMode) {
+        MsQuicSettings Settings;
+        if (IsValue(IoMode, "xdp")) {
+            Settings.SetXdpEnabled(true);
+        } else if (IsValue(IoMode, "qtip")) {
+            Settings.SetXdpEnabled(true);
+            Settings.SetQtipEnabled(true);
+        }
+        Settings.SetGlobal();
     }
 
     const char* CpuStr;
@@ -215,13 +214,13 @@ QuicMainStart(
 
     TryGetValue(argc, argv, "highpri", &PerfDefaultHighPriority);
     if (PerfDefaultHighPriority) {
-        Config->Flags |= QUIC_EXECUTION_CONFIG_FLAG_HIGH_PRIORITY;
+        Config->Flags |= QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_HIGH_PRIORITY;
         SetConfig = true;
     }
 
     TryGetValue(argc, argv, "affinitize", &PerfDefaultAffinitizeThreads);
     if (PerfDefaultHighPriority) {
-        Config->Flags |= QUIC_EXECUTION_CONFIG_FLAG_AFFINITIZE;
+        Config->Flags |= QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_AFFINITIZE;
         SetConfig = true;
     }
 
@@ -235,7 +234,7 @@ QuicMainStart(
         MsQuic->SetParam(
             nullptr,
             QUIC_PARAM_GLOBAL_EXECUTION_CONFIG,
-            (uint32_t)QUIC_EXECUTION_CONFIG_MIN_SIZE + Config->ProcessorCount * sizeof(uint16_t),
+            (uint32_t)QUIC_GLOBAL_EXECUTION_CONFIG_MIN_SIZE + Config->ProcessorCount * sizeof(uint16_t),
             Config))) {
         WriteOutput("Failed to set execution config %d\n", Status);
         return Status;
@@ -291,6 +290,11 @@ QuicMainStart(
 
     TryGetValue(argc, argv, "ecn", &PerfDefaultEcnEnabled);
     TryGetValue(argc, argv, "qeo", &PerfDefaultQeoAllowed);
+    TryGetValue(argc, argv, "dscp", &PerfDefaultDscpValue);
+    if (PerfDefaultDscpValue > CXPLAT_MAX_DSCP) {
+        WriteOutput("DSCP Value %u is outside the valid range (0-63). Using 0.\n", PerfDefaultDscpValue);
+        PerfDefaultDscpValue = 0;
+    }
 
     uint32_t WatchdogTimeout = 0;
     if (TryGetValue(argc, argv, "watchdog", &WatchdogTimeout) && WatchdogTimeout != 0) {
@@ -298,17 +302,18 @@ QuicMainStart(
     }
 
 #ifndef _KERNEL_MODE
-    WorkerPool = CxPlatWorkerPoolCreate(nullptr);
+    WorkerPool = CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
 #endif
 
     const CXPLAT_UDP_DATAPATH_CALLBACKS DatapathCallbacks = {
         PerfServer::DatapathReceive,
         PerfServer::DatapathUnreachable
     };
-    Status = CxPlatDataPathInitialize(0, &DatapathCallbacks, &TcpEngine::TcpCallbacks, WorkerPool, nullptr, &Datapath);
+    CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+    Status = CxPlatDataPathInitialize(0, &DatapathCallbacks, &TcpEngine::TcpCallbacks, WorkerPool, &InitConfig, &Datapath);
     if (QUIC_FAILED(Status)) {
 #ifndef _KERNEL_MODE
-        CxPlatWorkerPoolDelete(WorkerPool);
+        CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
 #endif
         WriteOutput("Datapath for shutdown failed to initialize: %d\n", Status);
         return Status;
@@ -354,7 +359,7 @@ QuicMainFree(
     if (Datapath) {
         CxPlatDataPathUninitialize(Datapath);
 #ifndef _KERNEL_MODE
-        CxPlatWorkerPoolDelete(WorkerPool);
+        CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
 #endif
         Datapath = nullptr;
     }
